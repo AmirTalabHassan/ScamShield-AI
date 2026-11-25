@@ -13,7 +13,7 @@ from PIL import Image
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-MODEL_NAME = "gemini-3-flash-preview"
+FALLBACK_MODEL = "gemini-2.5-flash"
 
 if not TELEGRAM_TOKEN:
     print("ERROR: TELEGRAM_TOKEN is missing or empty in environment variables!", flush=True)
@@ -25,6 +25,8 @@ if not GEMINI_API_KEY:
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+_cached_model = None
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -55,25 +57,81 @@ SYSTEM_PROMPT = """
 """
 
 
-def analyze_with_gemini(contents):
-    print(f"ACTIVE_MODEL: {MODEL_NAME}", flush=True)
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.2,
-        ),
-    )
-    if response and response.text and response.text.strip():
-        return response.text.strip()
-    raise RuntimeError("Empty response received from Gemini API")
-
-
 def log_exception(tag, exc):
     print(f"{tag}: {repr(exc)}", flush=True)
     traceback.print_exc(file=sys.stdout)
     sys.stdout.flush()
+
+
+def get_working_model():
+    global _cached_model
+    if _cached_model:
+        return _cached_model
+
+    try:
+        available_names = []
+        for m in client.models.list():
+            name = (m.name or "").replace("models/", "").strip()
+            if name:
+                available_names.append(name)
+
+        print("AVAILABLE_MODELS:", available_names, flush=True)
+
+        for name in available_names:
+            lower = name.lower()
+            if "flash" in lower and "image" not in lower and "audio" not in lower and "tts" not in lower:
+                _cached_model = name
+                print(f"SELECTED_MODEL: {_cached_model}", flush=True)
+                return _cached_model
+
+        for name in available_names:
+            lower = name.lower()
+            if "gemini" in lower and "image" not in lower and "audio" not in lower:
+                _cached_model = name
+                print(f"SELECTED_MODEL: {_cached_model}", flush=True)
+                return _cached_model
+    except Exception as e:
+        log_exception("LIST_MODELS_ERROR", e)
+
+    _cached_model = FALLBACK_MODEL
+    print(f"SELECTED_MODEL (fallback): {_cached_model}", flush=True)
+    return _cached_model
+
+
+def analyze_with_gemini(contents):
+    global _cached_model
+    active_model = get_working_model()
+    print(f"ACTIVE_MODEL: {active_model}", flush=True)
+
+    try:
+        response = client.models.generate_content(
+            model=active_model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.2,
+            ),
+        )
+    except Exception as first_err:
+        if "404" in str(first_err) or "NOT_FOUND" in str(first_err):
+            log_exception("MODEL_404_RETRY_DISCOVERY", first_err)
+            _cached_model = None
+            active_model = get_working_model()
+            print(f"RETRYING_WITH_MODEL: {active_model}", flush=True)
+            response = client.models.generate_content(
+                model=active_model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.2,
+                ),
+            )
+        else:
+            raise
+
+    if response and response.text and response.text.strip():
+        return response.text.strip()
+    raise RuntimeError("Empty response received from Gemini API")
 
 
 @bot.message_handler(commands=["start"])
@@ -176,7 +234,9 @@ def run_bot():
     except Exception as e:
         log_exception("REMOVE_WEBHOOK_WARNING", e)
 
+    get_working_model()
     print("Starting ScamShield AI bot polling...", flush=True)
+
     while True:
         try:
             bot.infinity_polling(

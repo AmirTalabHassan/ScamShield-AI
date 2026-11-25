@@ -10,7 +10,28 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
+
+class HealthHandler(BaseHTTPRequestHandler):
+
+  def do_GET(self):
+    self.send_response(200)
+    self.end_headers()
+    self.wfile.write(b"OK")
+
+  def log_message(self, format, *args):
+    pass
+
+
+def start_health_server():
+  port = int(os.environ.get("PORT", 10000))
+  server = HTTPServer(("0.0.0.0", port), HealthHandler)
+  threading.Thread(target=server.serve_forever, daemon=True).start()
+
+
+start_health_server()
 SYSTEM_PROMPT = """
 أنت نظام "درع مكافحة الجريمة الإلكترونية (ScamShield AI)" المصمم لحماية المجتمع في دولة الإمارات من الاحتيال الإلكتروني.
 مهمتك تحليل الرسائل النصية، الروابط، أو لقطات الشاشة (Screenshots) المرسلة إليك.
